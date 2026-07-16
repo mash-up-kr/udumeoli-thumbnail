@@ -35,10 +35,14 @@ jobs:
         EOF
         chmod 600 ~/.ssh/id_rsa
 
+    - name: Stop Service before deployment
+      run: |
+        ssh -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_rsa ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "sudo systemctl stop thumbnailer || true"
+
     - name: Deploy binary via native SCP
       run: |
         scp -v -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_rsa thumbnailer ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }}:/home/${{ secrets.SERVER_USERNAME }}/app/thumbnailer
 
     - name: Restart Systemd Service via native SSH
       run: |
-        ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_rsa ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "chmod +x /home/${{ secrets.SERVER_USERNAME }}/app/thumbnailer && sudo systemctl restart thumbnailer"
+        ssh -v -o StrictHostKeyChecking=no -o BatchMode=yes -i ~/.ssh/id_rsa ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} "sudo systemctl start thumbnailer && sudo systemctl status thumbnailer"
