@@ -50,7 +50,9 @@ func (d *Database) InitSchema() error {
 					original_url       VARCHAR2(512)  NOT NULL,
 					thumbnail_url      VARCHAR2(512),
 					uploader_id        NUMBER(19),
-					created_at         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP NOT NULL
+					created_at         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP NOT NULL,
+					object_key         VARCHAR2(200),
+					CONSTRAINT fk_image_uploader FOREIGN KEY (uploader_id) REFERENCES service_user (id)
 				)
 			';
 		END IF;
@@ -63,11 +65,11 @@ func (d *Database) InitSchema() error {
 	return nil
 }
 
-// UpdateThumbnail updates the thumbnail URL for an existing image record
-func (d *Database) UpdateThumbnail(id int64, thumbnailURL string) error {
-	query := `UPDATE IMAGE SET thumbnail_url = :1 WHERE id = :2`
+// UpdateThumbnail updates the thumbnail URL and object key for an existing image record
+func (d *Database) UpdateThumbnail(id int64, thumbnailURL string, objectKey string) error {
+	query := `UPDATE IMAGE SET thumbnail_url = :1, object_key = :2 WHERE id = :3`
 
-	result, err := d.db.Exec(query, thumbnailURL, id)
+	result, err := d.db.Exec(query, thumbnailURL, objectKey, id)
 	if err != nil {
 		return fmt.Errorf("failed to update thumbnail record: %w", err)
 	}

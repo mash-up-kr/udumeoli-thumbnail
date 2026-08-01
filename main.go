@@ -109,7 +109,7 @@ func main() {
 			}
 
 			// 3. Save to Database (UPDATE)
-			if err := database.UpdateThumbnail(req.ID, thumbnailURL); err != nil {
+			if err := database.UpdateThumbnail(req.ID, thumbnailURL, objectName); err != nil {
 				log.Printf("Worker: Failed to update database for ID %d: %v", req.ID, err)
 				continue
 			}
