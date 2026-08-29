@@ -110,3 +110,23 @@ func (d *Database) GetImageInfo(id int64) (string, sql.NullString, sql.NullStrin
 func (d *Database) Close() error {
 	return d.db.Close()
 }
+
+// GetImageInfoByObjectKey fetches the original URL, original object key, encrypted KMS key, and thumbnail URL for an image by object key
+func (d *Database) GetImageInfoByObjectKey(objectKey string) (string, sql.NullString, sql.NullString, sql.NullString, error) {
+	query := `SELECT original_url, object_key, encrypted_key, thumbnail_url FROM image WHERE object_key = :1`
+
+	var originalURL string
+	var objKey sql.NullString
+	var encryptedKey sql.NullString
+	var thumbnailURL sql.NullString
+
+	err := d.db.QueryRow(query, objectKey).Scan(&originalURL, &objKey, &encryptedKey, &thumbnailURL)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", sql.NullString{}, sql.NullString{}, sql.NullString{}, fmt.Errorf("no record found with object_key %s", objectKey)
+		}
+		return "", sql.NullString{}, sql.NullString{}, sql.NullString{}, fmt.Errorf("failed to query image info: %w", err)
+	}
+
+	return originalURL, objKey, encryptedKey, thumbnailURL, nil
+}

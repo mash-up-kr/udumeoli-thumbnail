@@ -223,27 +223,22 @@ func main() {
 			return
 		}
 
-		idStr := strings.TrimPrefix(r.URL.Path, "/stream/")
-		if idStr == "" {
+		objectKey := strings.TrimPrefix(r.URL.Path, "/stream/")
+		if objectKey == "" {
 			http.Error(w, "Missing image ID", http.StatusBadRequest)
 			return
 		}
 
 		expires := r.URL.Query().Get("expires")
 		sig := r.URL.Query().Get("sig")
-		if !isValidSignature(idStr, expires, sig, kmsMasterKey) {
+		if !isValidSignature(objectKey, expires, sig, kmsMasterKey) {
 			http.Error(w, "Unauthorized or expired link", http.StatusUnauthorized)
 			return
 		}
 
-		id, err := strconv.ParseInt(idStr, 10, 64)
-		if err != nil {
-			http.Error(w, "Invalid image ID", http.StatusBadRequest)
-			return
-		}
 
 		ctx := r.Context()
-		originalURL, _, encryptedKeyNull, thumbnailURLNull, err := database.GetImageInfo(id)
+		originalURL, _, encryptedKeyNull, thumbnailURLNull, err := database.GetImageInfoByObjectKey(objectKey)
 		if err != nil {
 			http.Error(w, "Image not found", http.StatusNotFound)
 			return
