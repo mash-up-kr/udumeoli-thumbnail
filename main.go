@@ -2,13 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
+	"thumbnailer/internal/crypto"
 	"thumbnailer/internal/db"
 	"thumbnailer/internal/image"
 	"thumbnailer/internal/storage"
@@ -29,18 +36,40 @@ type ProcessResponse struct {
 	ThumbnailURL string `json:"thumbnail_url"`
 }
 
+func extractObjectKey(fullURL string) string {
+	parts := strings.SplitN(fullURL, "/o/", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	parts = strings.Split(fullURL, "/")
+	return parts[len(parts)-1]
+}
+
+func isValidSignature(imageId string, expiresStr string, receivedSig string, masterKey []byte) bool {
+	expires, err := strconv.ParseInt(expiresStr, 10, 64)
+	if err != nil || time.Now().Unix() > expires {
+		return false
+	}
+
+	payload := fmt.Sprintf("%s:%s", imageId, expiresStr)
+	h := hmac.New(sha256.New, masterKey)
+	h.Write([]byte(payload))
+	expectedSigBytes := h.Sum(nil)
+
+	expectedSig := base64.RawURLEncoding.EncodeToString(expectedSigBytes)
+	return expectedSig == receivedSig
+}
+
 // @title Nifty Galileo Thumbnail API
 // @version 1.0
 // @description This is an asynchronous thumbnail generation API.
 // @host localhost:8080
 // @BasePath /
 func main() {
-	// Load .env file if it exists
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found or error reading it, relying on system environment variables")
 	}
 
-	// Initialize configurations from environment variables
 	dbDSN := os.Getenv("DB_DSN")
 	if dbDSN == "" {
 		log.Fatal("DB_DSN environment variable is required. Format: oracle://user:password@host:port/service")
@@ -51,12 +80,17 @@ func main() {
 		log.Fatal("OCI_BUCKET_NAME environment variable is required")
 	}
 
+	kmsMasterKeyStr := os.Getenv("KMS_MASTER_KEY")
+	if kmsMasterKeyStr == "" || len(kmsMasterKeyStr) != 32 {
+		log.Println("WARNING: KMS_MASTER_KEY is not set or not 32 bytes long. SSE-C encryption/decryption will fail if required.")
+	}
+	kmsMasterKey := []byte(kmsMasterKeyStr)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
-	// Initialize Database
 	log.Println("Connecting to Oracle Database...")
 	database, err := db.NewDatabase(dbDSN)
 	if err != nil {
@@ -69,47 +103,70 @@ func main() {
 		log.Fatalf("Failed to initialize database schema: %v", err)
 	}
 
-	// Initialize OCI Storage
 	log.Println("Initializing OCI Object Storage client...")
 	ociStorage, err := storage.NewOCIStorage(bucketName)
 	if err != nil {
 		log.Fatalf("Failed to initialize OCI storage: %v", err)
 	}
 
-	// Initialize Image Processor (max width 480, max height 480)
 	processor := image.NewProcessor(480, 480)
-
-	// Create a channel for queuing requests
-	// Buffer size of 100 ensures we can accept up to 100 requests quickly
 	queue := make(chan ProcessRequest, 100)
 
-	// Start a single background worker goroutine
-	// This ensures requests are processed strictly one by one
 	go func() {
 		log.Println("Background worker started. Waiting for jobs...")
 		for req := range queue {
-			log.Printf("Worker: Processing thumbnail for ID %d (URL: %s)", req.ID, req.ImageURL)
-
-			// Context with timeout for individual job (optional, but good practice)
+			log.Printf("Worker: Processing thumbnail for ID %d", req.ID)
 			ctx := context.Background()
 
-			// 1. Generate Thumbnail
-			thumbReader, err := processor.GenerateThumbnail(req.ImageURL)
+			// 1. Fetch info from DB
+			originalURL, _, encryptedKeyNull, err := database.GetImageInfo(req.ID)
+			if err != nil {
+				log.Printf("Worker: Failed to get image info for ID %d: %v", req.ID, err)
+				continue
+			}
+
+			// 2. Decrypt DEK if present
+			var plainDEK []byte
+			if encryptedKeyNull.Valid && encryptedKeyNull.String != "" {
+				if len(kmsMasterKey) != 32 {
+					log.Printf("Worker: KMS_MASTER_KEY is invalid, cannot decrypt image ID %d", req.ID)
+					continue
+				}
+				plainDEK, err = crypto.DecryptDEK(encryptedKeyNull.String, kmsMasterKey)
+				if err != nil {
+					log.Printf("Worker: Failed to decrypt DEK for ID %d: %v", req.ID, err)
+					continue
+				}
+			}
+
+			// Extract original key
+			originalKey := extractObjectKey(originalURL)
+
+			// 3. Download original image using OCI SDK (with or without SSE-C)
+			imgReader, err := ociStorage.DownloadImage(ctx, originalKey, plainDEK)
+			if err != nil {
+				log.Printf("Worker: Failed to download image for ID %d from key %s: %v", req.ID, originalKey, err)
+				continue
+			}
+
+			// 4. Generate Thumbnail in memory
+			thumbReader, err := processor.GenerateThumbnail(imgReader)
+			imgReader.Close() // Close the original image reader after processing
 			if err != nil {
 				log.Printf("Worker: Failed to generate thumbnail for ID %d: %v", req.ID, err)
 				continue
 			}
 
-			// 2. Upload to OCI
-			objectName := fmt.Sprintf("thumb_%d_%d.jpg", req.ID, time.Now().UnixNano())
-			thumbnailURL, err := ociStorage.UploadThumbnail(ctx, objectName, thumbReader)
+			// 5. Upload Thumbnail to OCI using the same DEK (SSE-C)
+			thumbnailKey := fmt.Sprintf("thumb_%d_%d.jpg", req.ID, time.Now().UnixNano())
+			thumbnailURL, err := ociStorage.UploadThumbnail(ctx, thumbnailKey, thumbReader, plainDEK)
 			if err != nil {
-				log.Printf("Worker: Failed to upload to OCI for ID %d: %v", req.ID, err)
+				log.Printf("Worker: Failed to upload thumbnail for ID %d: %v", req.ID, err)
 				continue
 			}
 
-			// 3. Save to Database (UPDATE)
-			if err := database.UpdateThumbnail(req.ID, thumbnailURL, objectName); err != nil {
+			// 6. Save to Database (UPDATE)
+			if err := database.UpdateThumbnail(req.ID, thumbnailURL, thumbnailKey); err != nil {
 				log.Printf("Worker: Failed to update database for ID %d: %v", req.ID, err)
 				continue
 			}
@@ -145,12 +202,6 @@ func main() {
 			return
 		}
 
-		if req.ImageURL == "" {
-			http.Error(w, "image_url is required", http.StatusBadRequest)
-			return
-		}
-
-		// Push to queue
 		select {
 		case queue <- req:
 			w.Header().Set("Content-Type", "application/json")
@@ -161,16 +212,76 @@ func main() {
 			})
 			log.Printf("Enqueued request for ID %d", req.ID)
 		default:
-			// Queue is full
 			http.Error(w, "Server is busy, try again later", http.StatusServiceUnavailable)
 			log.Printf("Queue full. Rejected request for ID %d", req.ID)
 		}
 	})
 
-	// Swagger UI handler
+	http.HandleFunc("/stream/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		idStr := strings.TrimPrefix(r.URL.Path, "/stream/")
+		if idStr == "" {
+			http.Error(w, "Missing image ID", http.StatusBadRequest)
+			return
+		}
+
+		expires := r.URL.Query().Get("expires")
+		sig := r.URL.Query().Get("sig")
+		if !isValidSignature(idStr, expires, sig, kmsMasterKey) {
+			http.Error(w, "Unauthorized or expired link", http.StatusUnauthorized)
+			return
+		}
+
+		id, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "Invalid image ID", http.StatusBadRequest)
+			return
+		}
+
+		ctx := r.Context()
+		originalURL, _, encryptedKeyNull, err := database.GetImageInfo(id)
+		if err != nil {
+			http.Error(w, "Image not found", http.StatusNotFound)
+			return
+		}
+
+		var plainDEK []byte
+		if encryptedKeyNull.Valid && encryptedKeyNull.String != "" {
+			if len(kmsMasterKey) != 32 {
+				http.Error(w, "Server configuration error", http.StatusInternalServerError)
+				return
+			}
+			plainDEK, err = crypto.DecryptDEK(encryptedKeyNull.String, kmsMasterKey)
+			if err != nil {
+				http.Error(w, "Decryption error", http.StatusInternalServerError)
+				return
+			}
+		}
+
+		originalKey := extractObjectKey(originalURL)
+		imgReader, err := ociStorage.DownloadImage(ctx, originalKey, plainDEK)
+		if err != nil {
+			http.Error(w, "Failed to fetch image from storage", http.StatusBadGateway)
+			return
+		}
+		defer imgReader.Close()
+
+		w.Header().Set("Cache-Control", "public, max-age=31536000")
+		if strings.HasSuffix(strings.ToLower(originalKey), ".png") {
+			w.Header().Set("Content-Type", "image/png")
+		} else {
+			w.Header().Set("Content-Type", "image/jpeg")
+		}
+
+		io.Copy(w, imgReader)
+	})
+
 	http.HandleFunc("/swagger/", httpSwagger.WrapHandler)
 
-	// Start server
 	log.Printf("Server starting on port %s", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		log.Fatalf("Server failed: %v", err)

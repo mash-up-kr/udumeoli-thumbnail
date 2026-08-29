@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -54,8 +56,33 @@ func NewOCIStorage(bucketName string) (*OCIStorage, error) {
 	}, nil
 }
 
-// UploadThumbnail uploads the thumbnail and returns its public URL
-func (s *OCIStorage) UploadThumbnail(ctx context.Context, objectName string, data io.Reader) (string, error) {
+// DownloadImage downloads an image from OCI, optionally using SSE-C
+func (s *OCIStorage) DownloadImage(ctx context.Context, objectName string, plainDEK []byte) (io.ReadCloser, error) {
+	req := objectstorage.GetObjectRequest{
+		NamespaceName: common.String(s.namespace),
+		BucketName:    common.String(s.bucket),
+		ObjectName:    common.String(objectName),
+	}
+
+	if plainDEK != nil {
+		req.OpcSseCustomerAlgorithm = common.String("AES256")
+		req.OpcSseCustomerKey = common.String(base64.StdEncoding.EncodeToString(plainDEK))
+		
+		hasher := sha256.New()
+		hasher.Write(plainDEK)
+		req.OpcSseCustomerKeySha256 = common.String(base64.StdEncoding.EncodeToString(hasher.Sum(nil)))
+	}
+
+	resp, err := s.client.GetObject(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object: %w", err)
+	}
+
+	return resp.Content, nil
+}
+
+// UploadThumbnail uploads the thumbnail and returns its public URL, optionally using SSE-C
+func (s *OCIStorage) UploadThumbnail(ctx context.Context, objectName string, data io.Reader, plainDEK []byte) (string, error) {
 	ext := strings.ToLower(filepath.Ext(objectName))
 	contentType := "image/jpeg"
 	if ext == ".png" {
@@ -70,16 +97,22 @@ func (s *OCIStorage) UploadThumbnail(ctx context.Context, objectName string, dat
 		ContentType:   common.String(contentType),
 	}
 
+	if plainDEK != nil {
+		req.OpcSseCustomerAlgorithm = common.String("AES256")
+		req.OpcSseCustomerKey = common.String(base64.StdEncoding.EncodeToString(plainDEK))
+		
+		hasher := sha256.New()
+		hasher.Write(plainDEK)
+		req.OpcSseCustomerKeySha256 = common.String(base64.StdEncoding.EncodeToString(hasher.Sum(nil)))
+	}
+
 	_, err := s.client.PutObject(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("failed to put object: %w", err)
 	}
 
 	// Assuming the bucket is public, construct the URL
-	// Format: https://objectstorage.<region>.oraclecloud.com/n/<namespace>/b/<bucket>/o/<object_name>
-	// Since region is in config provider, we can get it from client
 	region := s.client.Host
-	// Ensure host doesn't have scheme if we are prepending it
 	if !strings.HasPrefix(region, "http") {
 		region = "https://" + region
 	}

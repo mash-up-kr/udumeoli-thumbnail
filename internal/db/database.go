@@ -52,6 +52,7 @@ func (d *Database) InitSchema() error {
 					uploader_id        NUMBER(19),
 					created_at         TIMESTAMP      DEFAULT CURRENT_TIMESTAMP NOT NULL,
 					object_key         VARCHAR2(200),
+					encrypted_key      VARCHAR2(512),
 					CONSTRAINT fk_image_uploader FOREIGN KEY (uploader_id) REFERENCES service_user (id)
 				)
 			';
@@ -73,7 +74,7 @@ func (d *Database) UpdateThumbnail(id int64, thumbnailURL string, objectKey stri
 	if err != nil {
 		return fmt.Errorf("failed to update thumbnail record: %w", err)
 	}
-	
+
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("failed to get rows affected: %w", err)
@@ -83,6 +84,25 @@ func (d *Database) UpdateThumbnail(id int64, thumbnailURL string, objectKey stri
 	}
 
 	return nil
+}
+
+// GetImageInfo fetches the original URL, original object key, and encrypted KMS key for an image
+func (d *Database) GetImageInfo(id int64) (string, sql.NullString, sql.NullString, error) {
+	query := `SELECT original_url, object_key, encrypted_key FROM image WHERE id = :1`
+
+	var originalURL string
+	var objectKey sql.NullString
+	var encryptedKey sql.NullString
+
+	err := d.db.QueryRow(query, id).Scan(&originalURL, &objectKey, &encryptedKey)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", sql.NullString{}, sql.NullString{}, fmt.Errorf("no record found with ID %d", id)
+		}
+		return "", sql.NullString{}, sql.NullString{}, fmt.Errorf("failed to query image info: %w", err)
+	}
+
+	return originalURL, objectKey, encryptedKey, nil
 }
 
 // Close closes the database connection

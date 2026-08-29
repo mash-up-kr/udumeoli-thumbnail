@@ -7,7 +7,6 @@ import (
 	"image/jpeg"
 	_ "image/png" // register PNG format
 	"io"
-	"net/http"
 
 	"github.com/nfnt/resize"
 )
@@ -26,21 +25,10 @@ func NewProcessor(maxWidth, maxHeight uint) *Processor {
 	}
 }
 
-// GenerateThumbnail downloads an image from a URL and generates a thumbnail
-func (p *Processor) GenerateThumbnail(imageURL string) (io.Reader, error) {
-	// Download the image
-	resp, err := http.Get(imageURL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download image: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %s", resp.Status)
-	}
-
+// GenerateThumbnail generates a thumbnail from an image stream
+func (p *Processor) GenerateThumbnail(r io.Reader) (io.Reader, error) {
 	// Decode the image
-	img, _, err := image.Decode(resp.Body)
+	img, _, err := image.Decode(r)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode image: %w", err)
 	}
