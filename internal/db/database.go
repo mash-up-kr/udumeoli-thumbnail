@@ -106,6 +106,32 @@ func (d *Database) GetImageInfo(id int64) (string, sql.NullString, sql.NullStrin
 	return originalURL, objectKey, encryptedKey, thumbnailURL, nil
 }
 
+// GetPendingThumbnails fetches IDs of images that are missing thumbnails and are older than 5 minutes
+func (d *Database) GetPendingThumbnails(limit int) ([]int64, error) {
+	query := `SELECT id FROM image WHERE thumbnail_url IS NULL AND created_at < CURRENT_TIMESTAMP - INTERVAL '5' MINUTE FETCH FIRST :1 ROWS ONLY`
+	
+	rows, err := d.db.Query(query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pending thumbnails: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("row iteration error: %w", err)
+	}
+
+	return ids, nil
+}
+
 // Close closes the database connection
 func (d *Database) Close() error {
 	return d.db.Close()

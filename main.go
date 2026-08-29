@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,50 @@ func main() {
 
 	processor := image.NewProcessor(480, 480)
 	queue := make(chan ProcessRequest, 100)
+
+	// Scheduler: Periodically fetch missed thumbnails from DB
+	// We manage the retry count for these purely in-memory using a map
+	var schedulerFailTracker sync.Map
+	go func() {
+		log.Println("Scheduler started. Polling for missed thumbnails every 5 minutes...")
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			log.Println("Scheduler: Checking for missing thumbnails...")
+			ids, err := database.GetPendingThumbnails(50) // Fetch up to 50 at a time
+			if err != nil {
+				log.Printf("Scheduler: Failed to get pending thumbnails: %v", err)
+				continue
+			}
+
+			if len(ids) == 0 {
+				log.Println("Scheduler: No pending thumbnails found.")
+				continue
+			}
+			log.Printf("Scheduler: Found %d missing thumbnails", len(ids))
+
+			for _, id := range ids {
+				// Check global tracker
+				val, _ := schedulerFailTracker.LoadOrStore(id, 0)
+				attempts := val.(int)
+				if attempts >= 3 {
+					log.Printf("Scheduler: ID %d has already failed 3 times globally in memory, skipping", id)
+					continue
+				}
+				schedulerFailTracker.Store(id, attempts+1)
+
+				// Don't block the scheduler if queue is full
+				select {
+				case queue <- ProcessRequest{ID: id, RetryCount: 0}:
+					log.Printf("Scheduler: Queued missing thumbnail for ID %d", id)
+				default:
+					log.Printf("Scheduler: Queue full, skipped queuing ID %d for now", id)
+					schedulerFailTracker.Store(id, attempts) // Revert attempt count since we didn't queue
+				}
+			}
+		}
+	}()
 
 	go func() {
 		log.Println("Background worker started. Waiting for jobs...")
