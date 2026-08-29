@@ -119,8 +119,13 @@ func main() {
 			log.Printf("Worker: Processing thumbnail for ID %d (Attempt %d)", req.ID, req.RetryCount+1)
 			ctx := context.Background()
 
-			handleFailure := func(reason string, err error) {
+			handleFailure := func(reason string, err error, retriable bool) {
 				log.Printf("Worker: %s for ID %d: %v", reason, req.ID, err)
+				if !retriable {
+					log.Printf("Worker: Fatal (non-retriable) error for ID %d. Giving up immediately.", req.ID)
+					return
+				}
+				
 				if req.RetryCount < 3 {
 					req.RetryCount++
 					go func(r ProcessRequest) {
@@ -137,7 +142,9 @@ func main() {
 			// 1. Fetch info from DB
 			originalURL, _, encryptedKeyNull, thumbnailURLNull, err := database.GetImageInfo(req.ID)
 			if err != nil {
-				handleFailure("Failed to get image info", err)
+				// DB connection errors are retriable, but "no record found" is not
+				isRetriable := !strings.Contains(err.Error(), "no record found")
+				handleFailure("Failed to get image info", err, isRetriable)
 				continue
 			}
 
@@ -150,12 +157,12 @@ func main() {
 			var plainDEK []byte
 			if encryptedKeyNull.Valid && encryptedKeyNull.String != "" {
 				if len(kmsMasterKey) != 32 {
-					handleFailure("KMS_MASTER_KEY is invalid", fmt.Errorf("cannot decrypt image"))
+					handleFailure("KMS_MASTER_KEY is invalid", fmt.Errorf("cannot decrypt image"), false)
 					continue
 				}
 				plainDEK, err = crypto.DecryptDEK(encryptedKeyNull.String, kmsMasterKey)
 				if err != nil {
-					handleFailure("Failed to decrypt DEK", err)
+					handleFailure("Failed to decrypt DEK", err, false)
 					continue
 				}
 			}
@@ -166,7 +173,7 @@ func main() {
 			// 3. Download original image using OCI SDK (with or without SSE-C)
 			imgReader, err := ociStorage.DownloadImage(ctx, originalKey, plainDEK)
 			if err != nil {
-				handleFailure(fmt.Sprintf("Failed to download image from key %s", originalKey), err)
+				handleFailure(fmt.Sprintf("Failed to download image from key %s", originalKey), err, true)
 				continue
 			}
 
@@ -174,7 +181,7 @@ func main() {
 			thumbReader, err := processor.GenerateThumbnail(imgReader)
 			imgReader.Close()
 			if err != nil {
-				handleFailure("Failed to generate thumbnail", err)
+				handleFailure("Failed to generate thumbnail", err, false)
 				continue
 			}
 
@@ -182,13 +189,13 @@ func main() {
 			thumbnailKey := fmt.Sprintf("thumb_%d_%d.jpg", req.ID, time.Now().UnixNano())
 			thumbnailURL, err := ociStorage.UploadThumbnail(ctx, thumbnailKey, thumbReader, plainDEK)
 			if err != nil {
-				handleFailure("Failed to upload thumbnail", err)
+				handleFailure("Failed to upload thumbnail", err, true)
 				continue
 			}
 
 			// 6. Save to Database (UPDATE)
 			if err := database.UpdateThumbnail(req.ID, thumbnailURL, thumbnailKey); err != nil {
-				handleFailure("Failed to update database", err)
+				handleFailure("Failed to update database", err, true)
 				continue
 			}
 
