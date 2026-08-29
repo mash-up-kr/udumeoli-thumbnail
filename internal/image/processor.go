@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/jpeg"
 	_ "image/png" // register PNG format
+	_ "golang.org/x/image/webp" // register WebP format
 	"io"
 
 	"github.com/nfnt/resize"
