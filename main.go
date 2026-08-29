@@ -26,8 +26,9 @@ import (
 )
 
 type ProcessRequest struct {
-	ID       int64  `json:"id"`
-	ImageURL string `json:"image_url"`
+	ID         int64  `json:"id"`
+	ImageURL   string `json:"image_url"`
+	RetryCount int    `json:"-"`
 }
 
 type ProcessResponse struct {
@@ -115,13 +116,33 @@ func main() {
 	go func() {
 		log.Println("Background worker started. Waiting for jobs...")
 		for req := range queue {
-			log.Printf("Worker: Processing thumbnail for ID %d", req.ID)
+			log.Printf("Worker: Processing thumbnail for ID %d (Attempt %d)", req.ID, req.RetryCount+1)
 			ctx := context.Background()
 
+			handleFailure := func(reason string, err error) {
+				log.Printf("Worker: %s for ID %d: %v", reason, req.ID, err)
+				if req.RetryCount < 3 {
+					req.RetryCount++
+					go func(r ProcessRequest) {
+						delay := time.Duration(r.RetryCount*5) * time.Second
+						log.Printf("Worker: Retrying ID %d in %v...", r.ID, delay)
+						time.Sleep(delay)
+						queue <- r
+					}(req)
+				} else {
+					log.Printf("Worker: Giving up on ID %d after %d retries", req.ID, req.RetryCount)
+				}
+			}
+
 			// 1. Fetch info from DB
-			originalURL, _, encryptedKeyNull, _, err := database.GetImageInfo(req.ID)
+			originalURL, _, encryptedKeyNull, thumbnailURLNull, err := database.GetImageInfo(req.ID)
 			if err != nil {
-				log.Printf("Worker: Failed to get image info for ID %d: %v", req.ID, err)
+				handleFailure("Failed to get image info", err)
+				continue
+			}
+
+			if thumbnailURLNull.Valid && thumbnailURLNull.String != "" {
+				log.Printf("Worker: Thumbnail already exists for ID %d, skipping", req.ID)
 				continue
 			}
 
@@ -129,12 +150,12 @@ func main() {
 			var plainDEK []byte
 			if encryptedKeyNull.Valid && encryptedKeyNull.String != "" {
 				if len(kmsMasterKey) != 32 {
-					log.Printf("Worker: KMS_MASTER_KEY is invalid, cannot decrypt image ID %d", req.ID)
+					handleFailure("KMS_MASTER_KEY is invalid", fmt.Errorf("cannot decrypt image"))
 					continue
 				}
 				plainDEK, err = crypto.DecryptDEK(encryptedKeyNull.String, kmsMasterKey)
 				if err != nil {
-					log.Printf("Worker: Failed to decrypt DEK for ID %d: %v", req.ID, err)
+					handleFailure("Failed to decrypt DEK", err)
 					continue
 				}
 			}
@@ -145,15 +166,15 @@ func main() {
 			// 3. Download original image using OCI SDK (with or without SSE-C)
 			imgReader, err := ociStorage.DownloadImage(ctx, originalKey, plainDEK)
 			if err != nil {
-				log.Printf("Worker: Failed to download image for ID %d from key %s: %v", req.ID, originalKey, err)
+				handleFailure(fmt.Sprintf("Failed to download image from key %s", originalKey), err)
 				continue
 			}
 
 			// 4. Generate Thumbnail in memory
 			thumbReader, err := processor.GenerateThumbnail(imgReader)
-			imgReader.Close() // Close the original image reader after processing
+			imgReader.Close()
 			if err != nil {
-				log.Printf("Worker: Failed to generate thumbnail for ID %d: %v", req.ID, err)
+				handleFailure("Failed to generate thumbnail", err)
 				continue
 			}
 
@@ -161,13 +182,13 @@ func main() {
 			thumbnailKey := fmt.Sprintf("thumb_%d_%d.jpg", req.ID, time.Now().UnixNano())
 			thumbnailURL, err := ociStorage.UploadThumbnail(ctx, thumbnailKey, thumbReader, plainDEK)
 			if err != nil {
-				log.Printf("Worker: Failed to upload thumbnail for ID %d: %v", req.ID, err)
+				handleFailure("Failed to upload thumbnail", err)
 				continue
 			}
 
 			// 6. Save to Database (UPDATE)
 			if err := database.UpdateThumbnail(req.ID, thumbnailURL, thumbnailKey); err != nil {
-				log.Printf("Worker: Failed to update database for ID %d: %v", req.ID, err)
+				handleFailure("Failed to update database", err)
 				continue
 			}
 
