@@ -119,7 +119,7 @@ func main() {
 			ctx := context.Background()
 
 			// 1. Fetch info from DB
-			originalURL, _, encryptedKeyNull, err := database.GetImageInfo(req.ID)
+			originalURL, _, encryptedKeyNull, _, err := database.GetImageInfo(req.ID)
 			if err != nil {
 				log.Printf("Worker: Failed to get image info for ID %d: %v", req.ID, err)
 				continue
@@ -243,7 +243,7 @@ func main() {
 		}
 
 		ctx := r.Context()
-		originalURL, _, encryptedKeyNull, err := database.GetImageInfo(id)
+		originalURL, _, encryptedKeyNull, thumbnailURLNull, err := database.GetImageInfo(id)
 		if err != nil {
 			http.Error(w, "Image not found", http.StatusNotFound)
 			return
@@ -262,8 +262,13 @@ func main() {
 			}
 		}
 
-		originalKey := extractObjectKey(originalURL)
-		imgReader, err := ociStorage.DownloadImage(ctx, originalKey, plainDEK)
+		targetURL := originalURL
+		if r.URL.Query().Get("type") == "thumb" && thumbnailURLNull.Valid && thumbnailURLNull.String != "" {
+			targetURL = thumbnailURLNull.String
+		}
+
+		targetKey := extractObjectKey(targetURL)
+		imgReader, err := ociStorage.DownloadImage(ctx, targetKey, plainDEK)
 		if err != nil {
 			http.Error(w, "Failed to fetch image from storage", http.StatusBadGateway)
 			return
@@ -271,7 +276,7 @@ func main() {
 		defer imgReader.Close()
 
 		w.Header().Set("Cache-Control", "public, max-age=31536000")
-		if strings.HasSuffix(strings.ToLower(originalKey), ".png") {
+		if strings.HasSuffix(strings.ToLower(targetKey), ".png") {
 			w.Header().Set("Content-Type", "image/png")
 		} else {
 			w.Header().Set("Content-Type", "image/jpeg")
