@@ -21,6 +21,7 @@ import (
 	"thumbnailer/internal/image"
 	"thumbnailer/internal/storage"
 
+	_ "net/http/pprof"
 	_ "thumbnailer/docs"
 	"github.com/swaggo/http-swagger"
 	"github.com/joho/godotenv"
