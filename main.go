@@ -112,7 +112,8 @@ func main() {
 	}
 
 	processor := image.NewProcessor(480, 480)
-	queue := make(chan ProcessRequest, 100)
+	// Buffer size of 1000 allows handling large bursts without rejecting requests
+	queue := make(chan ProcessRequest, 1000)
 
 	// Scheduler: Periodically fetch missed thumbnails from DB
 	// We manage the retry count for these purely in-memory using a map
