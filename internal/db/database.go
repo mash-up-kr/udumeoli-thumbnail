@@ -67,10 +67,10 @@ func (d *Database) InitSchema() error {
 }
 
 // UpdateThumbnail updates the thumbnail URL and object key for an existing image record
-func (d *Database) UpdateThumbnail(id int64, thumbnailURL string, objectKey string) error {
-	query := `UPDATE IMAGE SET thumbnail_url = :1, object_key = :2 WHERE id = :3`
+func (d *Database) UpdateThumbnail(id int64, thumbnailURL string) error {
+	query := `UPDATE IMAGE SET thumbnail_url = :1 WHERE id = :2`
 
-	result, err := d.db.Exec(query, thumbnailURL, objectKey, id)
+	result, err := d.db.Exec(query, thumbnailURL, id)
 	if err != nil {
 		return fmt.Errorf("failed to update thumbnail record: %w", err)
 	}

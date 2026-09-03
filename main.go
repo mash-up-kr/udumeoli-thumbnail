@@ -241,7 +241,7 @@ func main() {
 			}
 
 			// 6. Save to Database (UPDATE)
-			if err := database.UpdateThumbnail(req.ID, thumbnailURL, thumbnailKey); err != nil {
+			if err := database.UpdateThumbnail(req.ID, thumbnailURL); err != nil {
 				handleFailure("Failed to update database", err, true)
 				continue
 			}
